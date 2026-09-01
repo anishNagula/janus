@@ -2,6 +2,9 @@
 
 #include <chrono>
 #include <iostream>
+#include <iomanip>
+#include <ctime>
+#include <sstream>
 
 using namespace std;
 
@@ -19,8 +22,8 @@ Scheduler::~Scheduler() {
 void Scheduler::start() {
   shutdown = false;
 
-  scheduler_thread = thread(&Scheduler::scheduler_thread, this);
-  boost_thread = thread(&Scheduler::boost_thread, this);
+  scheduler_thread = thread(&Scheduler::schedulerLoop, this);
+  boost_thread = thread(&Scheduler::boostLoop, this);
 }
 
 
@@ -38,6 +41,37 @@ void Scheduler::stop() {
 
 
 
+string currentTime() {
+
+  auto now = chrono::system_clock::now();
+  auto time = chrono::system_clock::to_time_t(now);
+
+  tm localTime = *localtime(&time);
+
+  auto ms = chrono::duration_cast<chrono::milliseconds>(
+    now.time_since_epoch()
+  ) % 1000;
+
+  ostringstream oss;
+
+  oss << put_time(&localTime, "%H:%M:%S")
+      << '.'
+      << setfill('0') << setw(3) << ms.count();
+
+  return oss.str();
+}
+
+
+
+void Scheduler::log(const string& message) {
+  lock_guard<mutex> lock(print_mutex);
+
+  cout << "[" << currentTime() << "] " << message << '\n';
+}
+
+
+
+
 int Scheduler::submitJob(int work) {
   lock_guard<mutex> lock(queue_mutex);
 
@@ -47,16 +81,14 @@ int Scheduler::submitJob(int work) {
 
   queues[0].push(job);
 
-  cout
-    << "[SUBMIT] Job " << id
-    << " -> Q0"
-    << " | work=" << work
-    << '\n';
+  log(
+      "[SUBMIT] Job " + std::to_string(id) +
+      " -> Q0 | work=" + std::to_string(work)
+  );
 
+  cv.notify_one();      // wake scheduler if sleeping
 
-    cv.notify_one();      // wake scheduler if sleeping
-
-    return id;
+  return id;
 }
 
 
@@ -96,11 +128,11 @@ void Scheduler::runJob(Job job) {
 
   int execution_time = min(quantum[level], job.remaining_work);   // job gets atmost one quantum during this scheduling turn
 
-  cout
-    << "[RUN] Job " << job.id
-    << " | Q" << level
-    << " | running=" <<  execution_time
-    << '\n';
+  log(
+      "[RUN] Job " + std::to_string(job.id) +
+      " | Q" + std::to_string(level) +
+      " | running=" + std::to_string(execution_time) + "ms"
+  );
 
   
   // simulating cpu
@@ -114,12 +146,12 @@ void Scheduler::runJob(Job job) {
   if (job.remaining_work <= 0) {
     job.state = JobState::COMPLETED;
 
-    cout
-      << "[COMPLETED] Job "
-      << job.id
-      << '\n';
+    log(
+        "[COMPLETED] Job " +
+        std::to_string(job.id)
+    );
 
-      return;
+    return;
   }
 
 
@@ -130,10 +162,10 @@ void Scheduler::runJob(Job job) {
     job.state = JobState::READY;
     queues[level].push(job);
 
-    cout
-      << "[REQUEUE] Job " << job.id
-      << " -> Q" << level
-      << '\n';
+    log(
+        "[REQUEUE] Job " + std::to_string(job.id) +
+        " -> Q" + std::to_string(level)
+    );
   }
 }
 
@@ -153,11 +185,11 @@ void Scheduler::demote(Job &job) {
 
     queues[job.priority].push(job);
 
-    cout
-      << "[DEMOTE] Job " << job.id
-      << " Q" << old_priority
-      << " -> Q" << job.priority
-      << '\n';
+    log(
+        "[DEMOTE] Job " + std::to_string(job.id) +
+        " Q" + std::to_string(old_priority) +
+        " -> Q" + std::to_string(job.priority)
+    );
   } else {                                            // already in lowest level
 
     job.level_runtime = 0;
@@ -165,10 +197,10 @@ void Scheduler::demote(Job &job) {
 
     queues[job.priority].push(job);
 
-    cout
-      << "[REQUEUE] Job " << job.id
-      << " remains Q" << job.priority
-      << '\n';
+    log(
+        "[REQUEUE] Job " + std::to_string(job.id) +
+        " remains Q" + std::to_string(job.priority)
+    );
   }
 }
 
@@ -176,6 +208,79 @@ void Scheduler::demote(Job &job) {
 
 void Scheduler::schedulerLoop() {
 
-  
+  while (!shutdown) {
+    
+    Job job(-1, 0);
 
+    {
+      unique_lock<mutex> lock(queue_mutex);
+
+      cv.wait(lock, [this] {                          // sleep until job available or scheduler shutdown
+        return shutdown || hasJobs();
+      });
+
+      if (shutdown) break;
+
+      job = getNextJob();                            // scan from q0 (high priority)
+    }
+
+    runJob(job);   //  dont hold lock while exec so that other jobs can be submitted
+
+  }  
+}
+
+void Scheduler::boostPriorities() {
+  lock_guard<mutex> lock(queue_mutex);
+
+  queue<Job> boosted;
+
+  for (int level = 0; level < NUM_LEVELS; level++) {
+    while (!queues[level].empty()) {
+      Job job = queues[level].front();
+      queues[level].pop();
+
+      job.priority = 0;
+      job.level_runtime = 0;
+      job.state = JobState::READY;
+
+      boosted.push(job);
+    }
+  }
+
+  queues[0] = std::move(boosted);
+
+  if (!queues[0].empty()) {
+    log(
+        "[BOOST] All waiting jobs moved to Q0"
+    );
+
+    cv.notify_one();
+  }
+}
+
+
+void Scheduler::boostLoop() {
+
+  constexpr int BOOST_INTERVAL = 5000;
+
+  unique_lock<mutex> lock(queue_mutex);
+
+  while (!shutdown) {
+    
+    cv.wait_for(
+      lock,
+      chrono::milliseconds(BOOST_INTERVAL),
+      [this] {
+        return shutdown.load();
+      }
+    );
+    
+    if (shutdown) break;
+
+    lock.unlock();
+
+    boostPriorities();
+
+    lock.lock();
+  }
 }

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <string>
 
 using namespace std;
 
@@ -33,6 +34,7 @@ private:
   vector<queue<Job>> queues;
 
   mutex queue_mutex;            // protects queue
+  mutex print_mutex;
   condition_variable cv;        // sleep scheduler until work available
   atomic<bool> shutdown;        // shared flag b/w producer, scheduler, booster
 
@@ -53,7 +55,7 @@ private:
   void schedulerLoop();
   void boostLoop();
 
-
+  void log(const string& message);
 
 public:
 
