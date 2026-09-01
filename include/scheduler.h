@@ -17,56 +17,56 @@ class Scheduler{
 
 private:
 
-  static constexpr int NUM_LEVELS = 3;   // #levels
+    static constexpr int NUM_LEVELS = 3;   // #levels
 
-  const int quantum[NUM_LEVELS] = {
-    100,
-    200,
-    400,
-  };
+    const int quantum[NUM_LEVELS] = {
+      100,
+      200,
+      400,
+    };
 
-  const int allotment[NUM_LEVELS] = {
-    400,
-    800,
-    1600
-  };
+    const int allotment[NUM_LEVELS] = {
+      400,
+      800,
+      1600
+    };
 
-  vector<queue<Job>> queues;
+    vector<queue<Job>> queues;
 
-  mutex queue_mutex;            // protects queue
-  mutex print_mutex;
-  condition_variable cv;        // sleep scheduler until work available
-  atomic<bool> shutdown;        // shared flag b/w producer, scheduler, booster
+    mutex queue_mutex;            // protects queue
+    mutex print_mutex;
+    condition_variable cv;        // sleep scheduler until work available
+    atomic<bool> shutdown;        // shared flag b/w producer, scheduler, booster
 
-  thread scheduler_thread;      // run scheduler
-  thread boost_thread;          // run booster
+    thread scheduler_thread;      // run scheduler
+    thread boost_thread;          // run booster
 
-  int next_job_id;
+    int next_job_id;
 
-  bool hasJobs();
+    bool hasJobs();
 
-  Job getNextJob();
+    Job getNextJob();
 
-  void runJob(Job job);
-  void demote(Job &job);
+    void runJob(Job job);
+    void demote(Job &job);
 
-  void boostPriorities();
+    void boostPriorities();
 
-  void schedulerLoop();
-  void boostLoop();
+    void schedulerLoop();
+    void boostLoop();
 
-  void log(const string& message);
+    void log(const string& message);
 
 public:
 
-  Scheduler();
+    Scheduler();
 
-  ~Scheduler();
+    ~Scheduler();
 
-  void start();
-  void stop();
+    void start();
+    void stop();
 
-  int submitJob(int work);
+    int submitJob(int work);
 };
 
 

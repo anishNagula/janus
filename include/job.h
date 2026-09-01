@@ -4,25 +4,25 @@
 #include <string>
 
 enum JobState {
-  READY,
-  RUNNING,
-  COMPLETED
+    READY,
+    RUNNING,
+    COMPLETED
 };
 
 struct Job {
-  int id; // pid
+    int id; // pid
 
-  int total_work;
-  int remaining_work;
+    int total_work;
+    int remaining_work;
 
-  int priority; // starts off with 0 (highest)
-  int level_runtime;  // current cpu time spent in level
+    int priority; // starts off with 0 (highest)
+    int level_runtime;  // current cpu time spent in level
 
-  JobState state;
+    JobState state;
 
-  Job(int id, int work);
+    Job(int id, int work);
 
-  bool isCompleted() const;
+    bool isCompleted() const;
 };
 
 #endif

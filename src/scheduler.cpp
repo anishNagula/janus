@@ -9,278 +9,279 @@
 using namespace std;
 
 Scheduler::Scheduler():
-  queues(NUM_LEVELS),
-  shutdown(false),
-  next_job_id(1) {}
+    queues(NUM_LEVELS),
+    shutdown(false),
+    next_job_id(1) {}
 
 Scheduler::~Scheduler() {
-  stop();
+    stop();
 }
 
-
+// ------------ Start and Stop ------------
 
 void Scheduler::start() {
-  shutdown = false;
+    shutdown = false;
 
-  scheduler_thread = thread(&Scheduler::schedulerLoop, this);
-  boost_thread = thread(&Scheduler::boostLoop, this);
+    scheduler_thread = thread(&Scheduler::schedulerLoop, this);
+    boost_thread = thread(&Scheduler::boostLoop, this);
 }
 
 
 
 void Scheduler::stop() {
-  if (shutdown) return;
+    if (shutdown) return;
 
-  shutdown = true;
+    shutdown = true;
 
-  cv.notify_all();  // wakes sleeping threads to read if (shutdown) break
+    cv.notify_all();  // wakes sleeping threads to read if (shutdown) break
 
-  if (scheduler_thread.joinable()) scheduler_thread.join();   // wait for scheduler_thread to finish
-  if (boost_thread.joinable()) boost_thread.join();           // wait for boost_thread to finish
+    if (scheduler_thread.joinable()) scheduler_thread.join();   // wait for scheduler_thread to finish
+    if (boost_thread.joinable()) boost_thread.join();           // wait for boost_thread to finish
 }
 
 
+// ------------ Logging ------------
 
 string currentTime() {
 
-  auto now = chrono::system_clock::now();
-  auto time = chrono::system_clock::to_time_t(now);
+    auto now = chrono::system_clock::now();
+    auto time = chrono::system_clock::to_time_t(now);
 
-  tm localTime = *localtime(&time);
+    tm localTime = *localtime(&time);
 
-  auto ms = chrono::duration_cast<chrono::milliseconds>(
-    now.time_since_epoch()
-  ) % 1000;
+    auto ms = chrono::duration_cast<chrono::milliseconds>(
+        now.time_since_epoch()
+    ) % 1000;
 
-  ostringstream oss;
+    ostringstream oss;
 
-  oss << put_time(&localTime, "%H:%M:%S")
-      << '.'
-      << setfill('0') << setw(3) << ms.count();
+    oss << put_time(&localTime, "%H:%M:%S")
+        << '.'
+        << setfill('0') << setw(3) << ms.count();
 
-  return oss.str();
+    return oss.str();
 }
 
 
 
 void Scheduler::log(const string& message) {
-  lock_guard<mutex> lock(print_mutex);
+    lock_guard<mutex> lock(print_mutex);
 
-  cout << "[" << currentTime() << "] " << message << '\n';
+    cout << "[" << currentTime() << "] " << message << '\n';
 }
 
 
-
+// ------------ Schedule ~ Check ~ getNext Jobs ------------
 
 int Scheduler::submitJob(int work) {
-  lock_guard<mutex> lock(queue_mutex);
+    lock_guard<mutex> lock(queue_mutex);
 
-  int id = next_job_id++;
+    int id = next_job_id++;
 
-  Job job(id, work);
+    Job job(id, work);
 
-  queues[0].push(job);
+    queues[0].push(job);
 
-  log(
-      "[SUBMIT] Job " + std::to_string(id) +
-      " -> Q0 | work=" + std::to_string(work)
-  );
+    log(
+        "[SUBMIT] Job " + std::to_string(id) +
+        " -> Q0 | work=" + std::to_string(work)
+    );
 
-  cv.notify_one();      // wake scheduler if sleeping
+    cv.notify_one();      // wake scheduler if sleeping
 
-  return id;
+    return id;
 }
 
 
 
 bool Scheduler::hasJobs() {
-  for (const auto &queue : queues) {
-    if (!queue.empty()) return true;
-  }
+    for (const auto &queue : queues) {
+        if (!queue.empty()) return true;
+    }
 
-  return false;
+    return false;
 }
 
 
 
 Job Scheduler::getNextJob() {
 
-  // queue_mutex must already be locked
+    // queue_mutex must already be locked
 
-  for (int level = 0; level < NUM_LEVELS; ++level) {
-    if (!queues[level].empty()) {
-      Job job = queues[level].front();
+    for (int level = 0; level < NUM_LEVELS; ++level) {
+        if (!queues[level].empty()) {
+        Job job = queues[level].front();
 
-      queues[level].pop();
-      return job;
+        queues[level].pop();
+        return job;
+        }
     }
-  }
 
-  return Job(-1, 0);      // edge case return job with id : -1 and work : 0
-
+    return Job(-1, 0);      // edge case return job with id : -1 and work : 0
 }
+
+// ------------ Run Job ------------
 
 void Scheduler::runJob(Job job) {
 
-  int level = job.priority;
+    int level = job.priority;
 
-  job.state = JobState::RUNNING;
+    job.state = JobState::RUNNING;
 
-  int execution_time = min(quantum[level], job.remaining_work);   // job gets atmost one quantum during this scheduling turn
-
-  log(
-      "[RUN] Job " + std::to_string(job.id) +
-      " | Q" + std::to_string(level) +
-      " | running=" + std::to_string(execution_time) + "ms"
-  );
-
-  
-  // simulating cpu
-  this_thread::sleep_for(
-    chrono::milliseconds(execution_time)
-  );
-
-  job.remaining_work -= execution_time;
-  job.level_runtime += execution_time;
-
-  if (job.remaining_work <= 0) {
-    job.state = JobState::COMPLETED;
+    int execution_time = min(quantum[level], job.remaining_work);   // job gets atmost one quantum during this scheduling turn
 
     log(
-        "[COMPLETED] Job " +
-        std::to_string(job.id)
+        "[RUN] Job " + std::to_string(job.id) +
+        " | Q" + std::to_string(level) +
+        " | running=" + std::to_string(execution_time) + "ms"
     );
 
-    return;
-  }
-
-
-  if (job.level_runtime >= allotment[level]) {        // rule 4 (demote after level_runtime >= allotment time)
-    demote(job);
-  } else {                                            // rule 2 (same level round robin)
-    lock_guard<mutex> lock(queue_mutex);
-    job.state = JobState::READY;
-    queues[level].push(job);
-
-    log(
-        "[REQUEUE] Job " + std::to_string(job.id) +
-        " -> Q" + std::to_string(level)
+    
+    // simulating cpu
+    this_thread::sleep_for(
+        chrono::milliseconds(execution_time)
     );
-  }
+
+    job.remaining_work -= execution_time;
+    job.level_runtime += execution_time;
+
+    if (job.remaining_work <= 0) {
+        job.state = JobState::COMPLETED;
+
+        log(
+            "[COMPLETED] Job " +
+            std::to_string(job.id)
+        );
+
+        return;
+    }
+
+
+    if (job.level_runtime >= allotment[level]) {        // rule 4 (demote after level_runtime >= allotment time)
+        demote(job);
+    } else {                                            // rule 2 (same level round robin)
+        lock_guard<mutex> lock(queue_mutex);
+        job.state = JobState::READY;
+        queues[level].push(job);
+
+        log(
+            "[REQUEUE] Job " + std::to_string(job.id) +
+            " -> Q" + std::to_string(level)
+        );
+    }
 }
 
-
+// ------------ Demote Logic ------------
 
 void Scheduler::demote(Job &job) {
 
-  lock_guard<mutex> lock(queue_mutex);
+    lock_guard<mutex> lock(queue_mutex);
 
-  if (job.priority < NUM_LEVELS - 1) {
-    int old_priority = job.priority;
+    if (job.priority < NUM_LEVELS - 1) {
+        int old_priority = job.priority;
 
-    job.priority++;
+        job.priority++;
 
-    job.level_runtime = 0;
-    job.state = JobState::READY;
+        job.level_runtime = 0;
+        job.state = JobState::READY;
 
-    queues[job.priority].push(job);
+        queues[job.priority].push(job);
 
-    log(
-        "[DEMOTE] Job " + std::to_string(job.id) +
-        " Q" + std::to_string(old_priority) +
-        " -> Q" + std::to_string(job.priority)
-    );
-  } else {                                            // already in lowest level
+        log(
+            "[DEMOTE] Job " + std::to_string(job.id) +
+            " Q" + std::to_string(old_priority) +
+            " -> Q" + std::to_string(job.priority)
+        );
+    } else {                                            // already in lowest level
 
-    job.level_runtime = 0;
-    job.state = JobState::READY;
+        job.level_runtime = 0;
+        job.state = JobState::READY;
 
-    queues[job.priority].push(job);
+        queues[job.priority].push(job);
 
-    log(
-        "[REQUEUE] Job " + std::to_string(job.id) +
-        " remains Q" + std::to_string(job.priority)
-    );
-  }
+        log(
+            "[REQUEUE] Job " + std::to_string(job.id) +
+            " remains Q" + std::to_string(job.priority)
+        );
+    }
 }
 
-
+// ------------ Scheduler and Boost Loop ------------
 
 void Scheduler::schedulerLoop() {
 
-  while (!shutdown) {
-    
-    Job job(-1, 0);
+    while (!shutdown) {
+        
+        Job job(-1, 0);
 
-    {
-      unique_lock<mutex> lock(queue_mutex);
+        {
+        unique_lock<mutex> lock(queue_mutex);
 
-      cv.wait(lock, [this] {                          // sleep until job available or scheduler shutdown
-        return shutdown || hasJobs();
-      });
+        cv.wait(lock, [this] {                          // sleep until job available or scheduler shutdown
+            return shutdown || hasJobs();
+        });
 
-      if (shutdown) break;
+        if (shutdown) break;
 
-      job = getNextJob();                            // scan from q0 (high priority)
-    }
+        job = getNextJob();                            // scan from q0 (high priority)
+        }
 
-    runJob(job);   //  dont hold lock while exec so that other jobs can be submitted
-
-  }  
+        runJob(job);   //  dont hold lock while exec so that other jobs can be submitted
+    }  
 }
 
 void Scheduler::boostPriorities() {
-  lock_guard<mutex> lock(queue_mutex);
+    lock_guard<mutex> lock(queue_mutex);
 
-  queue<Job> boosted;
+    queue<Job> boosted;
 
-  for (int level = 0; level < NUM_LEVELS; level++) {
-    while (!queues[level].empty()) {
-      Job job = queues[level].front();
-      queues[level].pop();
+    for (int level = 0; level < NUM_LEVELS; level++) {
+        while (!queues[level].empty()) {
+        Job job = queues[level].front();
+        queues[level].pop();
 
-      job.priority = 0;
-      job.level_runtime = 0;
-      job.state = JobState::READY;
+        job.priority = 0;
+        job.level_runtime = 0;
+        job.state = JobState::READY;
 
-      boosted.push(job);
+        boosted.push(job);
+        }
     }
-  }
 
-  queues[0] = std::move(boosted);
+    queues[0] = std::move(boosted);
 
-  if (!queues[0].empty()) {
-    log(
-        "[BOOST] All waiting jobs moved to Q0"
-    );
+    if (!queues[0].empty()) {
+        log(
+            "[BOOST] All waiting jobs moved to Q0"
+        );
 
-    cv.notify_one();
-  }
+        cv.notify_one();
+    }
 }
 
 
 void Scheduler::boostLoop() {
 
-  constexpr int BOOST_INTERVAL = 5000;
+    constexpr int BOOST_INTERVAL = 5000;
 
-  unique_lock<mutex> lock(queue_mutex);
+    unique_lock<mutex> lock(queue_mutex);
 
-  while (!shutdown) {
-    
-    cv.wait_for(
-      lock,
-      chrono::milliseconds(BOOST_INTERVAL),
-      [this] {
-        return shutdown.load();
-      }
-    );
-    
-    if (shutdown) break;
+    while (!shutdown) {
+        
+        cv.wait_for(
+        lock,
+        chrono::milliseconds(BOOST_INTERVAL),
+        [this] {
+            return shutdown.load();
+        }
+        );
+        
+        if (shutdown) break;
 
-    lock.unlock();
+        lock.unlock();
 
-    boostPriorities();
+        boostPriorities();
 
-    lock.lock();
-  }
+        lock.lock();
+    }
 }
